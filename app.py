@@ -31,7 +31,6 @@ from typing import List
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from sentence_transformers import SentenceTransformer
 
 
 # ============================================================
@@ -157,6 +156,7 @@ def load_models():
     )
 
     print("Loading Sentence Transformer...")
+    from sentence_transformers import SentenceTransformer
 
     embedding_model = SentenceTransformer(
         EMBEDDING_MODEL_PATH
