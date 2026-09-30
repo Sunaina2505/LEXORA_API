@@ -1,4 +1,3 @@
-
 """
 ============================================================
 LEXORA — CONTRACT CLAUSE RISK ANALYSIS API
@@ -125,16 +124,19 @@ def load_models():
     # --------------------------------------------------------
 
     print("\nLoading TF-IDF vectorizer...")
+
     tfidf_vectorizer = joblib.load(
         TFIDF_PATH
     )
 
     print("Loading Logistic Regression model...")
+
     risk_model = joblib.load(
         RISK_MODEL_PATH
     )
 
     print("Loading calibrated SVM model...")
+
     svm_model = joblib.load(
         SVM_MODEL_PATH
     )
@@ -145,8 +147,12 @@ def load_models():
 
     print("Loading clause embeddings...")
 
+    # MEMORY OPTIMIZATION:
+    # Use memory mapping instead of loading the complete
+    # embedding matrix into normal RAM.
     clause_embeddings = np.load(
-        EMBEDDINGS_PATH
+        EMBEDDINGS_PATH,
+        mmap_mode="r"
     )
 
     print("Loading metadata...")
@@ -156,10 +162,12 @@ def load_models():
     )
 
     print("Loading Sentence Transformer...")
+
     from sentence_transformers import SentenceTransformer
 
     embedding_model = SentenceTransformer(
-        EMBEDDING_MODEL_PATH
+        EMBEDDING_MODEL_PATH,
+        device="cpu"
     )
 
     # --------------------------------------------------------
@@ -208,9 +216,11 @@ def load_models():
 # ============================================================
 
 # IMPORTANT FOR RENDER:
-# Do not load the 86 MB Sentence Transformer during FastAPI
-# startup. Render must detect the HTTP port first. Models are
-# loaded on the first /predict or /search request instead.
+#
+# Do not load the Sentence Transformer during FastAPI startup.
+# Render must detect the HTTP port first.
+#
+# Models are loaded only when /predict or /search is requested.
 
 models_loaded = False
 
@@ -220,8 +230,15 @@ def ensure_models_loaded():
     global models_loaded
 
     if not models_loaded:
+
+        print("\nFirst ML request received.")
+        print("Loading LEXORA models...")
+
         load_models()
+
         models_loaded = True
+
+        print("LEXORA models are ready.")
 
 
 # ============================================================
@@ -298,41 +315,64 @@ def semantic_search(
     top_k: int = 5
 ):
 
+    # --------------------------------------------------------
     # Generate query embedding
+    # --------------------------------------------------------
+
     query_embedding = embedding_model.encode(
         [clause],
-        normalize_embeddings=True
+        normalize_embeddings=True,
+        convert_to_numpy=True
     )
 
-    # Ensure numpy array
-    query_embedding = np.asarray(
-        query_embedding
+    query_vector = np.asarray(
+        query_embedding[0],
+        dtype=np.float32
     )
 
-    # Existing embeddings were created for the
-    # same Sentence Transformer model.
-    #
-    # Normalize them for cosine similarity.
+    # --------------------------------------------------------
+    # Existing embeddings
+    # --------------------------------------------------------
+
     database_embeddings = clause_embeddings
 
-    norms = np.linalg.norm(
+    # --------------------------------------------------------
+    # MEMORY OPTIMIZATION
+    #
+    # The previous implementation created:
+    #
+    # normalized_database =
+    #     database_embeddings / norms
+    #
+    # That creates another complete copy of the embedding
+    # matrix in memory.
+    #
+    # Instead, calculate cosine similarity directly.
+    # --------------------------------------------------------
+
+    database_norms = np.linalg.norm(
         database_embeddings,
-        axis=1,
-        keepdims=True
+        axis=1
     )
 
-    normalized_database = (
-        database_embeddings /
-        np.maximum(norms, 1e-12)
+    query_norm = np.linalg.norm(
+        query_vector
     )
 
-    # Cosine similarity
+    dot_products = database_embeddings @ query_vector
+
     similarities = (
-        normalized_database @
-        query_embedding[0]
+        dot_products /
+        np.maximum(
+            database_norms * query_norm,
+            1e-12
+        )
     )
 
+    # --------------------------------------------------------
     # Get highest similarity indices
+    # --------------------------------------------------------
+
     top_indices = np.argsort(
         similarities
     )[::-1][:top_k]
@@ -348,18 +388,23 @@ def semantic_search(
                 "clause": str(
                     row["Clause"]
                 ),
+
                 "clause_type": str(
                     row["Clause_Type"]
                 ),
+
                 "risk_level": str(
                     row["Risk_Level"]
                 ),
+
                 "risk_reason": str(
                     row["Risk_Reason"]
                 ),
+
                 "recommended_action": str(
                     row["Recommended_Action"]
                 ),
+
                 "similarity": float(
                     similarities[idx]
                 )
@@ -393,9 +438,12 @@ def health():
 
     # The service is healthy even before ML artifacts are loaded.
     # They are intentionally loaded lazily for Render compatibility.
+
     return {
         "status": "healthy",
+
         "models_loaded": models_loaded,
+
         "embedding_count": (
             len(clause_embeddings)
             if clause_embeddings is not None
@@ -417,6 +465,7 @@ def predict(request: ClauseRequest):
     clause = request.clause.strip()
 
     if not clause:
+
         raise HTTPException(
             status_code=400,
             detail="Clause cannot be empty."
@@ -424,7 +473,10 @@ def predict(request: ClauseRequest):
 
     try:
 
-        # Load ML artifacts only when an actual prediction is requested.
+        # ----------------------------------------------------
+        # Load ML artifacts only when prediction is requested.
+        # ----------------------------------------------------
+
         ensure_models_loaded()
 
         # ----------------------------------------------------
@@ -527,6 +579,10 @@ def predict(request: ClauseRequest):
 
     except Exception as e:
 
+        print(
+            f"Prediction error: {str(e)}"
+        )
+
         raise HTTPException(
             status_code=500,
             detail=f"Prediction failed: {str(e)}"
@@ -543,6 +599,7 @@ def search(request: ClauseRequest):
     clause = request.clause.strip()
 
     if not clause:
+
         raise HTTPException(
             status_code=400,
             detail="Search clause cannot be empty."
@@ -550,7 +607,10 @@ def search(request: ClauseRequest):
 
     try:
 
-        # Load ML artifacts only when an actual search is requested.
+        # ----------------------------------------------------
+        # Load ML artifacts only when search is requested.
+        # ----------------------------------------------------
+
         ensure_models_loaded()
 
         results = semantic_search(
@@ -564,6 +624,10 @@ def search(request: ClauseRequest):
         }
 
     except Exception as e:
+
+        print(
+            f"Semantic search error: {str(e)}"
+        )
 
         raise HTTPException(
             status_code=500,
