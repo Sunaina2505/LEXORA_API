@@ -26,7 +26,6 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from contextlib import asynccontextmanager
 from typing import List
 
 from fastapi import FastAPI, HTTPException
@@ -205,17 +204,24 @@ def load_models():
 
 
 # ============================================================
-# FASTAPI LIFESPAN
+# LAZY MODEL LOADING
 # ============================================================
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
+# IMPORTANT FOR RENDER:
+# Do not load the 86 MB Sentence Transformer during FastAPI
+# startup. Render must detect the HTTP port first. Models are
+# loaded on the first /predict or /search request instead.
 
-    load_models()
+models_loaded = False
 
-    yield
 
-    print("\nLEXORA API shutting down...")
+def ensure_models_loaded():
+
+    global models_loaded
+
+    if not models_loaded:
+        load_models()
+        models_loaded = True
 
 
 # ============================================================
@@ -229,8 +235,7 @@ app = FastAPI(
         "risk analysis, confidence estimation, "
         "and semantic clause search."
     ),
-    version="1.0.0",
-    lifespan=lifespan
+    version="1.0.0"
 )
 
 
@@ -386,20 +391,10 @@ def root():
 @app.get("/health")
 def health():
 
-    models_loaded = all(
-        obj is not None
-        for obj in [
-            risk_model,
-            svm_model,
-            tfidf_vectorizer,
-            embedding_model,
-            clause_embeddings,
-            metadata
-        ]
-    )
-
+    # The service is healthy even before ML artifacts are loaded.
+    # They are intentionally loaded lazily for Render compatibility.
     return {
-        "status": "healthy" if models_loaded else "degraded",
+        "status": "healthy",
         "models_loaded": models_loaded,
         "embedding_count": (
             len(clause_embeddings)
@@ -428,6 +423,9 @@ def predict(request: ClauseRequest):
         )
 
     try:
+
+        # Load ML artifacts only when an actual prediction is requested.
+        ensure_models_loaded()
 
         # ----------------------------------------------------
         # STEP 1 — TF-IDF TRANSFORMATION
@@ -551,6 +549,9 @@ def search(request: ClauseRequest):
         )
 
     try:
+
+        # Load ML artifacts only when an actual search is requested.
+        ensure_models_loaded()
 
         results = semantic_search(
             clause,
